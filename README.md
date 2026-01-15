@@ -57,6 +57,27 @@ F, mask = cv2.findFundamentalMat(
 ```
 We additionally provide two demos in the [demos folder](demo), which might help in understanding.
 
+## Batch Matching
+For efficiently processing large numbers of image pairs, use the batch matching script:
+
+```bash
+# Create a CSV file with image pairs (image_A_path,image_B_path)
+# Then run batch matching
+python scripts/batch_match.py \
+    --pairs-csv pairs.csv \
+    --output-dir outputs/matches/ \
+    --cache-images \
+    --num-samples 5000
+
+# Results are saved as NPZ files with dense warps and optional sampled matches
+# See examples/README_batch_matching.md for detailed documentation
+```
+
+Key features:
+- **Intelligent caching**: Automatically reorders pairs and caches images to maximize throughput
+- **Resume capability**: Skips already processed pairs, safe to interrupt and restart
+- **Flexible output**: Dense warp fields + optional sampled keypoint matches
+- **Multiple quality settings**: From `turbo` (fastest) to `precise` (highest quality)
 
 ## Setup/Install
 In your python environment (tested on Linux python 3.12), run:
