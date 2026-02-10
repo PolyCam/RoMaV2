@@ -29,6 +29,7 @@ from romav2.types import Setting, ImageLike
 logger = logging.getLogger(__name__)
 
 
+@torch.profiler.record_function("interpolate_warp_conf")
 def _interpolate_warp_and_confidence(
     *,
     warp: torch.Tensor,
@@ -176,12 +177,14 @@ class RoMaV2(nn.Module):
         # init preds
         predictions = OrderedDict()
         # extract feats
-        f_A = self.f(img_A_lr)
-        f_B = self.f(img_B_lr)
+        with torch.profiler.record_function("DINO_x2"):
+            f_A = self.f(img_A_lr)
+            f_B = self.f(img_B_lr)
         # match feats
-        matcher_output = self.matcher(
-            f_A, f_B, img_A=img_A_lr, img_B=img_B_lr, bidirectional=self.bidirectional
-        )
+        with torch.profiler.record_function("matcher"):
+            matcher_output = self.matcher(
+                f_A, f_B, img_A=img_A_lr, img_B=img_B_lr, bidirectional=self.bidirectional
+            )
         # return matcher_output
         predictions["matcher"] = matcher_output
         warp_AB, confidence_AB = (
@@ -206,8 +209,9 @@ class RoMaV2(nn.Module):
             scale_factor = torch.tensor(
                 (W / self.anchor_width, H / self.anchor_height), device=device
             )
-            refiner_features_A = self.refiner_features(img_A)
-            refiner_features_B = self.refiner_features(img_B)
+            with torch.profiler.record_function("refiner_features"):
+                refiner_features_A = self.refiner_features(img_A)
+                refiner_features_B = self.refiner_features(img_B)
             for patch_size_str, refiner in self.refiners.items():
                 patch_size = int(patch_size_str)
                 zero_out_precision = (
@@ -233,21 +237,23 @@ class RoMaV2(nn.Module):
 
                 f_patch_A = refiner_features_A[patch_size]
                 f_patch_B = refiner_features_B[patch_size]
-                refiner_output_AB = refiner(
-                    f_A=f_patch_A,
-                    f_B=f_patch_B,
-                    prev_warp=warp_AB,
-                    prev_confidence=confidence_AB,
-                    scale_factor=scale_factor,
-                )
-                if self.bidirectional:
-                    refiner_output_BA = refiner(
-                        f_A=f_patch_B,
-                        f_B=f_patch_A,
-                        prev_warp=warp_BA,
-                        prev_confidence=confidence_BA,
+                with torch.profiler.record_function("refiner"):
+                    refiner_output_AB = refiner(
+                        f_A=f_patch_A,
+                        f_B=f_patch_B,
+                        prev_warp=warp_AB,
+                        prev_confidence=confidence_AB,
                         scale_factor=scale_factor,
                     )
+                if self.bidirectional:
+                    with torch.profiler.record_function("refiner"):
+                        refiner_output_BA = refiner(
+                            f_A=f_patch_B,
+                            f_B=f_patch_A,
+                            prev_warp=warp_BA,
+                            prev_confidence=confidence_BA,
+                            scale_factor=scale_factor,
+                        )
                 else:
                     refiner_output_BA = None
                 predictions[f"refiner_{patch_size}_AB"] = refiner_output_AB
@@ -297,6 +303,128 @@ class RoMaV2(nn.Module):
         if len(img.shape) == 3:
             img = img[None]
         return img
+
+    @torch.profiler.record_function("cache_features")
+    @torch.inference_mode()
+    def cache_features(self,
+                       img_like:ImageLike):
+        img = self._load_image(img_like)
+
+        img_lr = F.interpolate(
+            img,
+            size=(self.H_lr, self.W_lr),
+            mode="bicubic",
+            align_corners=False,
+            antialias=True,
+        )
+        feat = self.f(img_lr)
+        #XXX move features to CPU?
+        return {"img":      img,
+                "rescaled": img_lr,
+                "features": feat,
+                }
+    
+    @torch.profiler.record_function("cache_features")
+    @torch.inference_mode()
+    def cache_batch_features(self, inputs):
+        print(f"Processing a batch of {len(inputs)}")
+        ibatch = []
+        for i in inputs:
+            img_like = i[1]
+            img = self._load_image(img_like)
+
+            img_lr = F.interpolate(
+                img,
+                size=(self.H_lr, self.W_lr),
+                mode="bicubic",
+                align_corners=False,
+                antialias=True,
+            )
+            ibatch.append(img_lr)
+        ibatch = torch.cat(ibatch)
+        feat = self.f(ibatch)
+        pred = []
+        for idx in range(feat[0].shape[0]):
+            nfeat = []
+            #XXX maybe a clone here
+            for j in range(len(feat)):
+                nfeat.append(feat[j][idx:idx+1])
+            pred.append({"img":      inputs[idx][1],
+                         "rescaled": ibatch[idx],
+                         "features": nfeat,#feat[idx],
+                         "path":     inputs[idx][0]
+                         })
+        return pred
+    
+    @torch.inference_mode()
+    def coarse_cached_match(
+        self,
+        frame_A,
+        frame_B,
+    ) -> dict[str, torch.Tensor]:
+        self.eval()
+        with torch.profiler.record_function("matcher"):
+            matcher_output = self.matcher(
+                frame_A["features"],
+                frame_B["features"],
+                img_A=frame_A["rescaled"],
+                img_B=frame_B["rescaled"],
+                bidirectional=False)
+        overlap_AB = matcher_output["confidence_AB"][..., :1].sigmoid()
+        preds = {
+            "warp_AB": matcher_output["warp_AB"].clone(),
+            "confidence_AB": matcher_output["confidence_AB"].clone(),
+            "overlap_AB": overlap_AB.clone(),
+            "precision_AB": None,
+            "warp_BA":       None,
+            "confidence_BA": None,
+            "overlap_BA":    None,
+            "precision_BA": None,
+        }
+        return preds
+
+    @torch.inference_mode()
+    def coarse_match(
+        self,
+        img_like_A: ImageLike,
+        img_like_B: ImageLike,
+    ) -> dict[str, torch.Tensor]:
+        self.eval()
+        img_A = self._load_image(img_like_A)
+        img_B = self._load_image(img_like_B)
+
+        img_A_lr = F.interpolate(
+            img_A,
+            size=(self.H_lr, self.W_lr),
+            mode="bicubic",
+            align_corners=False,
+            antialias=True,
+        )
+        img_B_lr = F.interpolate(
+            img_B,
+            size=(self.H_lr, self.W_lr),
+            mode="bicubic",
+            align_corners=False,
+            antialias=True,
+        )
+
+        preds = self.coarse_forward(img_A_lr, img_B_lr)
+        
+        warp_AB = preds["warp_AB"]
+        confidence_AB = preds["confidence_AB"]
+        overlap_AB = confidence_AB[..., :1].sigmoid()
+
+        preds = {
+            "warp_AB": warp_AB.clone(),
+            "confidence_AB": confidence_AB.clone(),
+            "overlap_AB": overlap_AB.clone(),
+            "precision_AB": None,
+            "warp_BA":       None,
+            "confidence_BA": None,
+            "overlap_BA":    None,
+            "precision_BA": None,
+        }
+        return preds
 
     @torch.inference_mode()
     def match(
@@ -370,6 +498,7 @@ class RoMaV2(nn.Module):
         }
         return preds
 
+    @torch.profiler.record_function("sample")
     def sample(self, preds: dict[str, torch.Tensor], num_corresp: int):
         warp = preds["warp_AB"]
         confidence_AB = preds["overlap_AB"]
