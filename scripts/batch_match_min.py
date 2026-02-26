@@ -88,8 +88,9 @@ def save_results(
     overlap_AB: torch.Tensor,
     path_A: str,
     path_B: str,
+    save_format: str = 'pt',
 ):
-    """Save matching results to pt file.
+    """Save matching results to pt or npy file.
     
     Args:
         output_path: Output file path
@@ -97,22 +98,33 @@ def save_results(
         warp_AB: (H, W, 2) warp field in normalized coordinates
         overlap_AB: (H, W, 1) overlap logit
         path_A, path_B: Image paths
+        save_format: Format to save ('pt' or 'npy')
     """
-    # Convert to dict
-    data = {
-        'pair_id': pair_id,
-        'warp_AB': warp_AB,
-        'overlap_AB': overlap_AB,
-        'image_A_path': path_A,
-        'image_B_path': path_B,
-    }
-
     # Ensure output directory exists
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Save
     with torch.profiler.record_function("save_to_disk"):
-        torch.save(data, output_path)
+        if save_format == 'npy':
+            # Convert tensors to numpy and save as npz
+            np.savez(
+                output_path,
+                pair_id=pair_id,
+                warp_AB=warp_AB.cpu().numpy(),
+                overlap_AB=overlap_AB.cpu().numpy(),
+                image_A_path=path_A,
+                image_B_path=path_B,
+            )
+        else:
+            # Convert to dict
+            data = {
+                'pair_id': pair_id,
+                'warp_AB': warp_AB,
+                'overlap_AB': overlap_AB,
+                'image_A_path': path_A,
+                'image_B_path': path_B,
+            }
+            torch.save(data, output_path)
 
 @torch.profiler.record_function("load_im")
 def load_im(path):
@@ -212,7 +224,8 @@ def process_real_batch(
     output_dir: Path,
     stats: dict,
     cache,
-) -> tuple[list[Path], Optional[np.ndarray]]:
+    save_format: str = 'pt',
+) -> None:
 
     output_paths = []
     feat1_A  = []
@@ -222,9 +235,12 @@ def process_real_batch(
     img_A   = []
     img_B   = []
 
+    # Determine file extension based on save format
+    file_ext = '.npz' if save_format == 'npy' else '.pt'
+
     #Assemble batch
     for pair_id, path_A, path_B in batch_pairs:
-        output_path = output_dir / f"{pair_id}.pt"
+        output_path = output_dir / f"{pair_id}{file_ext}"
         output_paths.append(output_path)
         frame_A = cache[path_A]
         frame_B = cache[path_B]
@@ -264,6 +280,7 @@ def process_real_batch(
                 overlap_AB=overlap_AB,
                 path_A=path_A,
                 path_B=path_B,
+                save_format=save_format,
             )
             idx += 1
             stats['processed'] += 1
@@ -276,21 +293,35 @@ def process_real_batch(
             ids.append(pair_id)
             pA.append(path_A)
             pB.append(path_B)
-        # Convert to dict
-        data = {
-            'pair_id':      ids,
-            'warp_AB':      preds["warp_AB"],
-            'overlap_AB':   preds["overlap_AB"],
-            'image_A_path': pA,
-            'image_B_path': pB,
-        }
-
+        
+        # Use first output path for batch saving
+        output_path = output_paths[0]
+        
         # Ensure output directory exists
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
         # Save
         with torch.profiler.record_function("save_to_disk"):
-            torch.save(data, output_path)
+            if save_format == 'npy':
+                # Save as npz with arrays
+                np.savez(
+                    output_path,
+                    pair_id=ids,
+                    warp_AB=preds["warp_AB"].cpu().numpy(),
+                    overlap_AB=preds["overlap_AB"].cpu().numpy(),
+                    image_A_path=pA,
+                    image_B_path=pB,
+                )
+            else:
+                # Convert to dict
+                data = {
+                    'pair_id':      ids,
+                    'warp_AB':      preds["warp_AB"],
+                    'overlap_AB':   preds["overlap_AB"],
+                    'image_A_path': pA,
+                    'image_B_path': pB,
+                }
+                torch.save(data, output_path)
 
 def main():
     parser = argparse.ArgumentParser(
@@ -299,17 +330,21 @@ def main():
         epilog="""
             Examples:
             # Basic usage
-            python scripts/batch_match.py --pairs-csv pairs.csv --output-dir outputs/
+            python scripts/batch_match_min.py --pairs-csv pairs.csv --output-dir outputs/
+            
+            # Save results in NumPy format
+            python scripts/batch_match_min.py --pairs-csv pairs.csv --output-dir outputs/ \\
+                --save-format npy
             
             # With image caching and match sampling
-            python scripts/batch_match.py --pairs-csv pairs.csv --output-dir outputs/ \\
+            python scripts/batch_match_min.py --pairs-csv pairs.csv --output-dir outputs/ \\
             
             # Fast processing with lower quality
-            python scripts/batch_match.py --pairs-csv pairs.csv --output-dir outputs/ \\
+            python scripts/batch_match_min.py --pairs-csv pairs.csv --output-dir outputs/ \\
                 --setting fast --batch-size 4
             
             # With precision calibration (100 pairs × 1000 samples per pair = 100k total)
-            python scripts/batch_match.py --pairs-csv pairs.csv --output-dir outputs/ \\
+            python scripts/batch_match_min.py --pairs-csv pairs.csv --output-dir outputs/ \\
                 --calibration-pairs 100 --calibration-sample-size 1000
         """
     )
@@ -338,6 +373,13 @@ def main():
         choices=['turbo', 'fast', 'base', 'precise'],
         default='base',
         help='Model setting (default: base)'
+    )
+    parser.add_argument(
+        '--save-format',
+        type=str,
+        choices=['pt', 'npy'],
+        default='pt',
+        help='Save format for output files: pt (PyTorch) or npy (NumPy) (default: pt)'
     )
     
     args = parser.parse_args()
@@ -380,6 +422,10 @@ def main():
     
     processed_files = []
     
+    # Adjust file extensions based on save format
+    file_ext = '.npz' if args.save_format == 'npy' else '.pt'
+    logger.info(f"Saving results in {args.save_format.upper()} format (extension: {file_ext})")
+    
     activities = [torch.profiler.ProfilerActivity.CPU,
                   torch.profiler.ProfilerActivity.CUDA]
     #if(True):
@@ -405,6 +451,7 @@ def main():
                         output_dir=args.output_dir,
                         stats=stats,
                         cache=cache,
+                        save_format=args.save_format,
                     )
              
             pbar.update(len(batch))
