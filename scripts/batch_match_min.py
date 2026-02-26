@@ -6,7 +6,7 @@ Efficiently matches a list of image pairs from a CSV file and saves results to d
 Supports intelligent caching and pair ordering to maximize throughput.
 
 Usage:
-    python scripts/batch_match.py --pairs-csv pairs.csv --output-dir outputs/
+    python scripts/batch_match_min.py --pairs-csv pairs.csv --output-dir outputs/
 
 CSV Format:
     image_A_path,image_B_path
@@ -407,7 +407,7 @@ def main():
                         cache=cache,
                     )
              
-             pbar.update(len(batch))
+            pbar.update(len(batch))
                 
             # Update progress bar description
             if stats['processed'] > 0:
