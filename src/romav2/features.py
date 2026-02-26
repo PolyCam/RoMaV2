@@ -164,11 +164,11 @@ class VGG19(VGG):
 
 
 class VGG19BN(VGG):
-    def __init__(self, patch_size: int) -> None:
+    def __init__(self, patch_size: int, pretrained: bool) -> None:
         super().__init__()
         last_layer = {1: 7, 2: 14, 4: 27, 8: 40, 16: 52}[patch_size]
         self.layers = nn.ModuleList(
-            models.vgg19_bn(weights=models.VGG19_BN_Weights.IMAGENET1K_V1).features[
+            models.vgg19_bn(weights=models.VGG19_BN_Weights.IMAGENET1K_V1 if pretrained else None).features[
                 :last_layer
             ]
         )
@@ -179,12 +179,13 @@ class FineFeatures(nn.Module):
     class Cfg:
         type: Literal["vgg19", "vgg19bn"] = "vgg19bn"
         patch_size: int = 4
+        pretrained: bool = False
 
     def __new__(cls, cfg: Cfg):
         match cfg.type:
             case "vgg19":
-                return VGG19(cfg.patch_size)
+                return VGG19(cfg.patch_size, cfg.pretrained)
             case "vgg19bn":
-                return VGG19BN(cfg.patch_size)
+                return VGG19BN(cfg.patch_size, cfg.pretrained)
             case _:
                 raise ValueError(f"Unknown refiner features type: {cfg.type}")
