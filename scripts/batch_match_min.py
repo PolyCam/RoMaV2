@@ -106,21 +106,29 @@ def save_results(
     # Save
     with torch.profiler.record_function("save_to_disk"):
         if save_format == 'npy':
-            # Convert tensors to numpy and save as npz
+            # Convert tensors to numpy and save as npz (squeeze batch dimension if present)
+            assert warp_AB.dim() > 3 and warp_AB.shape[0] == 1 or warp_AB.dim() == 3, \
+                f"Expected batch dimension of 1, got shape {warp_AB.shape}"
+            assert overlap_AB.dim() > 3 and overlap_AB.shape[0] == 1 or overlap_AB.dim() == 3, \
+                f"Expected batch dimension of 1, got shape {overlap_AB.shape}"
             np.savez(
                 output_path,
                 pair_id=pair_id,
-                warp_AB=warp_AB.cpu().numpy(),
-                overlap_AB=overlap_AB.cpu().numpy(),
+                warp_AB=warp_AB.squeeze(0).cpu().numpy() if warp_AB.dim() > 3 else warp_AB.cpu().numpy(),
+                overlap_AB=overlap_AB.squeeze(0).cpu().numpy() if overlap_AB.dim() > 3 else overlap_AB.cpu().numpy(),
                 image_A_path=path_A,
                 image_B_path=path_B,
             )
         else:
-            # Convert to dict
+            # Convert to dict (squeeze batch dimension if present)
+            assert warp_AB.dim() > 3 and warp_AB.shape[0] == 1 or warp_AB.dim() == 3, \
+                f"Expected batch dimension of 1, got shape {warp_AB.shape}"
+            assert overlap_AB.dim() > 3 and overlap_AB.shape[0] == 1 or overlap_AB.dim() == 3, \
+                f"Expected batch dimension of 1, got shape {overlap_AB.shape}"
             data = {
                 'pair_id': pair_id,
-                'warp_AB': warp_AB,
-                'overlap_AB': overlap_AB,
+                'warp_AB': warp_AB.squeeze(0) if warp_AB.dim() > 3 else warp_AB,
+                'overlap_AB': overlap_AB.squeeze(0) if overlap_AB.dim() > 3 else overlap_AB,
                 'image_A_path': path_A,
                 'image_B_path': path_B,
             }
@@ -302,22 +310,27 @@ def process_real_batch(
 
         # Save
         with torch.profiler.record_function("save_to_disk"):
+            assert preds["warp_AB"].shape[0] == 1, \
+                f"Expected batch size 1, got {preds['warp_AB'].shape[0]}"
+            assert preds["overlap_AB"].shape[0] == 1, \
+                f"Expected batch size 1, got {preds['overlap_AB'].shape[0]}"
+            
             if save_format == 'npy':
-                # Save as npz with arrays
+                # Save as npz with arrays (squeeze batch dimension)
                 np.savez(
                     output_path,
                     pair_id=ids,
-                    warp_AB=preds["warp_AB"].cpu().numpy(),
-                    overlap_AB=preds["overlap_AB"].cpu().numpy(),
+                    warp_AB=preds["warp_AB"].squeeze(0).cpu().numpy(),
+                    overlap_AB=preds["overlap_AB"].squeeze(0).cpu().numpy(),
                     image_A_path=pA,
                     image_B_path=pB,
                 )
             else:
-                # Convert to dict
+                # Convert to dict (squeeze batch dimension)
                 data = {
                     'pair_id':      ids,
-                    'warp_AB':      preds["warp_AB"],
-                    'overlap_AB':   preds["overlap_AB"],
+                    'warp_AB':      preds["warp_AB"].squeeze(0),
+                    'overlap_AB':   preds["overlap_AB"].squeeze(0),
                     'image_A_path': pA,
                     'image_B_path': pB,
                 }
