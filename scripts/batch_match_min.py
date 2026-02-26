@@ -381,6 +381,11 @@ def main():
         default='pt',
         help='Save format for output files: pt (PyTorch) or npy (NumPy) (default: pt)'
     )
+    parser.add_argument(
+        '--save-trace',
+        action='store_true',
+        help='Save PyTorch profiler trace to trace.json (default: off)'
+    )
     
     args = parser.parse_args()
     
@@ -426,12 +431,21 @@ def main():
     file_ext = '.npz' if args.save_format == 'npy' else '.pt'
     logger.info(f"Saving results in {args.save_format.upper()} format (extension: {file_ext})")
     
-    activities = [torch.profiler.ProfilerActivity.CPU,
-                  torch.profiler.ProfilerActivity.CUDA]
-    #if(True):
-    with torch.profiler.profile(activities=activities,
-                                record_shapes=True,
-                                profile_memory=False,) as prof:
+    # Decide whether to use profiler
+    if args.save_trace:
+        logger.info("Profiler trace saving enabled")
+        profiler_context = torch.profiler.profile(
+            activities=[torch.profiler.ProfilerActivity.CPU,
+                       torch.profiler.ProfilerActivity.CUDA],
+            record_shapes=True,
+            profile_memory=False,
+        )
+    else:
+        # Use a no-op context manager when profiling is disabled
+        from contextlib import nullcontext
+        profiler_context = nullcontext()
+    
+    with profiler_context as prof:
      with torch.profiler.record_function("streaming_feature_cache"):
          cache = streaming_cache(model, pairs)
 
@@ -469,7 +483,9 @@ def main():
             
             idx = batch_end
     
-    prof.export_chrome_trace("trace.json")
+    if args.save_trace and prof is not None:
+        prof.export_chrome_trace("trace.json")
+    
     # Final statistics
     elapsed = time.time() - stats['start_time']
     logger.info("\n" + "="*60)
