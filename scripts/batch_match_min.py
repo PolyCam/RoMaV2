@@ -493,6 +493,12 @@ def main():
         action='store_true',
         help='Enable full-resolution refinement (slower but higher quality, default: off)'
     )
+    parser.add_argument(
+        '--resolution',
+        type=str,
+        default=None,
+        help='Custom resolution to override setting (e.g., "640" for 640x640 or "800" for 800x600)'
+    )
     
     args = parser.parse_args()
     
@@ -514,6 +520,17 @@ def main():
     logger.info(f"Initializing RoMaV2 with setting: {args.setting}")
     model = RoMaV2(RoMaV2.Cfg(compile=False))
     model.apply_setting(args.setting)
+    
+    # Override resolution if specified
+    if args.resolution:
+        # Square resolution
+        res = int(args.resolution)
+        model.H_lr = res
+        model.W_lr = res
+        logger.info(f"Custom resolution: {res}x{res}")
+    else:
+        logger.info(f"Using preset resolution: {model.W_lr}x{model.H_lr}")
+    
     model.eval()
     
     if args.refine:
