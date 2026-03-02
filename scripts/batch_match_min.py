@@ -226,6 +226,91 @@ def streaming_cache(model, pairs):
 
     return cache
 
+def _refined_cached_match(
+    model: RoMaV2,
+    frame_A,
+    frame_B,
+) -> dict[str, torch.Tensor]:
+    """Perform cached matching with full refinement pipeline.
+    
+    This produces full-resolution warps by applying the refinement stages
+    after the coarse matcher output, using pre-cached features to avoid
+    redundant feature extraction.
+    """
+    from romav2.romav2 import _interpolate_warp_and_confidence
+    
+    model.eval()
+    
+    # Get coarse predictions from matcher using cached features
+    with torch.profiler.record_function("matcher"):
+        matcher_output = model.matcher(
+            frame_A["features"],
+            frame_B["features"],
+            img_A=frame_A["rescaled"],
+            img_B=frame_B["rescaled"],
+            bidirectional=model.bidirectional
+        )
+    
+    warp_AB = matcher_output["warp_AB"]
+    confidence_AB = matcher_output["confidence_AB"]
+    
+    # Apply refinement stages using cached rescaled images
+    img_A_lr = frame_A["rescaled"]
+    img_B_lr = frame_B["rescaled"]
+    
+    B, C, H, W = img_A_lr.shape
+    device = warp_AB.device
+    scale_factor = torch.tensor(
+        (W / model.anchor_width, H / model.anchor_height), device=device
+    )
+    
+    # Extract refiner features
+    with torch.profiler.record_function("refiner_features"):
+        refiner_features_A = model.refiner_features(img_A_lr)
+        refiner_features_B = model.refiner_features(img_B_lr)
+    
+    # Refine through patch sizes
+    for patch_size_str, refiner in model.refiners.items():
+        patch_size = int(patch_size_str)
+        
+        warp_AB, confidence_AB = _interpolate_warp_and_confidence(
+            warp=warp_AB,
+            confidence=confidence_AB,
+            H=H,
+            W=W,
+            patch_size=patch_size,
+            zero_out_precision=False,
+        )
+        
+        f_patch_A = refiner_features_A[patch_size]
+        f_patch_B = refiner_features_B[patch_size]
+        
+        with torch.profiler.record_function("refiner"):
+            refiner_output_AB = refiner(
+                f_A=f_patch_A,
+                f_B=f_patch_B,
+                prev_warp=warp_AB,
+                prev_confidence=confidence_AB,
+                scale_factor=scale_factor,
+            )
+        
+        warp_AB = refiner_output_AB["warp"]
+        confidence_AB = refiner_output_AB["confidence"]
+    
+    overlap_AB = confidence_AB[..., :1].sigmoid()
+    
+    preds = {
+        "warp_AB": warp_AB.clone(),
+        "confidence_AB": confidence_AB.clone(),
+        "overlap_AB": overlap_AB.clone(),
+        "precision_AB": None,
+        "warp_BA": None,
+        "confidence_BA": None,
+        "overlap_BA": None,
+        "precision_BA": None,
+    }
+    return preds
+
 def process_real_batch(
     model: RoMaV2,
     batch_pairs: list[tuple[str, str, str]],
@@ -233,6 +318,7 @@ def process_real_batch(
     stats: dict,
     cache,
     save_format: str = 'pt',
+    refine: bool = False,
 ) -> None:
 
     output_paths = []
@@ -261,14 +347,17 @@ def process_real_batch(
 
     batch_A = {"features": [torch.cat(feat1_A),
                             torch.cat(feat2_A)],
-               "rescaled": torch.cat(img_A)}
+               "rescaled": torch.stack(img_A) if img_A[0].dim() == 3 else torch.cat(img_A)}
     batch_B = {"features": [torch.cat(feat1_B),
                             torch.cat(feat2_B)],
-               "rescaled": torch.cat(img_B)}
+               "rescaled": torch.stack(img_B) if img_B[0].dim() == 3 else torch.cat(img_B)}
 
     #Perform Inference
     with torch.profiler.record_function("DNN_exec"):
-        preds = model.coarse_cached_match(batch_A, batch_B)
+        if refine:
+            preds = _refined_cached_match(model, batch_A, batch_B)
+        else:
+            preds = model.coarse_cached_match(batch_A, batch_B)
 
     #Dissassemble batch
     with torch.profiler.record_function("save_batch"):
@@ -320,8 +409,8 @@ def process_real_batch(
                 np.savez(
                     output_path,
                     pair_id=ids,
-                    warp_AB=preds["warp_AB"].squeeze(0).cpu().numpy(),
-                    overlap_AB=preds["overlap_AB"].squeeze(0).cpu().numpy(),
+                    warp_AB=preds["warp_AB"].squeeze(0).detach().cpu().numpy(),
+                    overlap_AB=preds["overlap_AB"].squeeze(0).detach().cpu().numpy(),
                     image_A_path=pA,
                     image_B_path=pB,
                 )
@@ -329,8 +418,8 @@ def process_real_batch(
                 # Convert to dict (squeeze batch dimension)
                 data = {
                     'pair_id':      ids,
-                    'warp_AB':      preds["warp_AB"].squeeze(0),
-                    'overlap_AB':   preds["overlap_AB"].squeeze(0),
+                    'warp_AB':      preds["warp_AB"].squeeze(0).detach(),
+                    'overlap_AB':   preds["overlap_AB"].squeeze(0).detach(),
                     'image_A_path': pA,
                     'image_B_path': pB,
                 }
@@ -399,6 +488,11 @@ def main():
         action='store_true',
         help='Save PyTorch profiler trace to trace.json (default: off)'
     )
+    parser.add_argument(
+        '--refine',
+        action='store_true',
+        help='Enable full-resolution refinement (slower but higher quality, default: off)'
+    )
     
     args = parser.parse_args()
     
@@ -421,6 +515,11 @@ def main():
     model = RoMaV2(RoMaV2.Cfg(compile=False))
     model.apply_setting(args.setting)
     model.eval()
+    
+    if args.refine:
+        logger.info("Refinement enabled: outputs will be at full resolution (slower)")
+    else:
+        logger.info("Refinement disabled: outputs will be at coarse resolution (4x downsampled)")
     
     # Statistics
     stats = {
@@ -479,6 +578,7 @@ def main():
                         stats=stats,
                         cache=cache,
                         save_format=args.save_format,
+                        refine=args.refine,
                     )
              
             pbar.update(len(batch))
