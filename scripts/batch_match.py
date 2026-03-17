@@ -88,7 +88,7 @@ class LRUImageCache:
             'size': len(self.cache)
         }
 
-
+@torch.profiler.record_function("load_pairs_csv")
 def load_pairs_csv(csv_path: Path) -> list[tuple[str, str, str]]:
     """Load image pairs from CSV file.
     
@@ -133,6 +133,7 @@ def load_pairs_csv(csv_path: Path) -> list[tuple[str, str, str]]:
     return pairs
 
 
+@torch.profiler.record_function("optimize_pair_order")
 def optimize_pair_order(pairs: list[tuple[str, str, str]]) -> list[tuple[str, str, str]]:
     """Reorder pairs to maximize cache hits by clustering shared images.
     
@@ -195,6 +196,7 @@ def optimize_pair_order(pairs: list[tuple[str, str, str]]) -> list[tuple[str, st
     return ordered
 
 
+@torch.profiler.record_function("save_results")
 def save_results(
     output_path: Path,
     pair_id: str,
@@ -262,22 +264,28 @@ def save_results(
             data['precision_BA'] = precision_BA.cpu().numpy()
     
     # Add optional sampled matches
-    if matches is not None:
-        data['matches'] = matches.cpu().numpy()
-    if matches_confidence is not None:
-        data['matches_confidence'] = matches_confidence.cpu().numpy()
-    if keypoints_A is not None:
-        data['keypoints_A'] = keypoints_A.cpu().numpy()
-    if keypoints_B is not None:
-        data['keypoints_B'] = keypoints_B.cpu().numpy()
+    with torch.profiler.record_function("convert_to_numpy"):
+        if matches is not None:
+            data['matches'] = matches.cpu().numpy()
+    with torch.profiler.record_function("convert_to_numpy"):
+        if matches_confidence is not None:
+            data['matches_confidence'] = matches_confidence.cpu().numpy()
+    with torch.profiler.record_function("convert_to_numpy"):
+        if keypoints_A is not None:
+            data['keypoints_A'] = keypoints_A.cpu().numpy()
+    with torch.profiler.record_function("convert_to_numpy"):
+        if keypoints_B is not None:
+            data['keypoints_B'] = keypoints_B.cpu().numpy()
     
     # Ensure output directory exists
     output_path.parent.mkdir(parents=True, exist_ok=True)
     
     # Save
-    np.savez_compressed(output_path, **data)
+    with torch.profiler.record_function("save_to_disk"):
+        np.savez_compressed(output_path, **data)
 
 
+@torch.profiler.record_function("calibrate_precision_params")
 def calibrate_precision_params(precision_samples: np.ndarray) -> dict:
     """Calibrate precision parameters from collected samples.
     
@@ -352,6 +360,7 @@ def calibrate_precision_params(precision_samples: np.ndarray) -> dict:
     return calibration
 
 
+@torch.profiler.record_function("precision_matrix_to_params")
 def precision_matrix_to_params(precision_matrix: np.ndarray) -> np.ndarray:
     """Convert 2×2 precision matrix to 3-parameter representation.
     
@@ -378,6 +387,7 @@ def precision_matrix_to_params(precision_matrix: np.ndarray) -> np.ndarray:
     return params.astype(np.float32)
 
 
+@torch.profiler.record_function("precision_to_weight")
 def precision_to_weight(precision_params: np.ndarray, calibration: dict) -> np.ndarray:
     """Convert 3-channel precision parameters to normalized weight in [0, 1].
     
@@ -424,6 +434,7 @@ def precision_to_weight(precision_params: np.ndarray, calibration: dict) -> np.n
     return weight[..., np.newaxis].astype(np.float32)
 
 
+@torch.profiler.record_function("sample_precision_from_center")
 def sample_precision_from_center(precision: np.ndarray, num_samples: int = 1000) -> np.ndarray:
     """Sample precision values from center region of image.
     
@@ -467,6 +478,7 @@ def sample_precision_from_center(precision: np.ndarray, num_samples: int = 1000)
     return sampled
 
 
+@torch.profiler.record_function("update_npz")
 def update_npz_with_calibrated_precision(npz_path: Path, calibration: dict):
     """Update an NPZ file to add calibrated precision weights and remove raw precision.
     
@@ -498,6 +510,7 @@ def update_npz_with_calibrated_precision(npz_path: Path, calibration: dict):
     np.savez_compressed(npz_path, **updated_data)
 
 
+@torch.profiler.record_function("process_batch")
 def process_batch(
     model: RoMaV2,
     batch_pairs: list[tuple[str, str, str]],
@@ -539,22 +552,24 @@ def process_batch(
         
         try:
             # Load images
-            if cache is not None:
-                img_A, H_A, W_A = cache.get(path_A, model._load_image)
-                img_B, H_B, W_B = cache.get(path_B, model._load_image)
-            else:
-                img_A = model._load_image(path_A)
-                img_B = model._load_image(path_B)
-                # Extract original dimensions
-                if img_A.dim() == 4:
-                    _, _, H_A, W_A = img_A.shape
-                    _, _, H_B, W_B = img_B.shape
+            with torch.profiler.record_function("load_data"):
+                if cache is not None:
+                    img_A, H_A, W_A = cache.get(path_A, model._load_image)
+                    img_B, H_B, W_B = cache.get(path_B, model._load_image)
                 else:
-                    _, H_A, W_A = img_A.shape
-                    _, H_B, W_B = img_B.shape
+                    img_A = model._load_image(path_A)
+                    img_B = model._load_image(path_B)
+                    # Extract original dimensions
+                    if img_A.dim() == 4:
+                        _, _, H_A, W_A = img_A.shape
+                        _, _, H_B, W_B = img_B.shape
+                    else:
+                        _, H_A, W_A = img_A.shape
+                        _, H_B, W_B = img_B.shape
             
             # Match
-            preds = model.match(img_A, img_B)
+            with torch.profiler.record_function("DNN_exec"):
+                preds = model.match(img_A, img_B)
             
             # Get outputs (remove batch dimension)
             warp_AB = preds['warp_AB'][0]  # (H, W, 2)
@@ -565,7 +580,8 @@ def process_batch(
             precision_BA = preds['precision_BA'][0] if preds['precision_BA'] is not None else None
 
             # Collect precision samples for calibration (sample from center)
-            if (precision_samples is not None and 
+            with torch.profiler.record_function("prec_gather"):
+              if (precision_samples is not None and 
                 len(precision_samples) < max_calibration_samples):
                 # Sample from center region
                 precision_AB_np = precision_AB.cpu().numpy()
@@ -581,7 +597,8 @@ def process_batch(
             matches_confidence = None
             keypoints_A = None
             keypoints_B = None
-            if num_samples is not None and num_samples > 0:
+            with torch.profiler.record_function("prec_sample"):
+              if num_samples is not None and num_samples > 0:
                 try:
                     preds_for_sampling = {
                         'warp_AB': preds['warp_AB'],
@@ -607,7 +624,8 @@ def process_batch(
                     logger.warning(f"Failed to sample matches for {pair_id}: {e}")
             
             # Save results
-            save_results(
+            with torch.profiler.record_function("save_warps"):
+              save_results(
                 output_path=output_path,
                 pair_id=pair_id,
                 warp_AB=warp_AB,
@@ -764,6 +782,8 @@ def main():
     
     # Initialize model
     logger.info(f"Initializing RoMaV2 with setting: {args.setting}")
+    #Use compile=False for full tracing
+    #model = RoMaV2(RoMaV2.Cfg(compile=False))
     model = RoMaV2()
     model.apply_setting(args.setting)
     model.bidirectional = args.bidirectional
@@ -816,7 +836,11 @@ def main():
     
     calibration_complete = False
     
-    with tqdm(total=len(pairs), desc="Matching pairs", unit="pair") as pbar:
+    activities = [torch.profiler.ProfilerActivity.CPU]
+    activities += [torch.profiler.ProfilerActivity.CUDA]
+    with torch.profiler.profile(activities=activities, record_shapes=True) as prof:
+     with torch.profiler.record_function("matching_pairs"):
+      with tqdm(total=len(pairs), desc="Matching pairs", unit="pair") as pbar:
         idx = 0
         while idx < len(pairs):
             # Determine batch size
@@ -835,12 +859,14 @@ def main():
                     logger.info(f"{'='*60}")
                     
                     # Calibrate precision parameters
-                    calibration = calibrate_precision_params(precision_samples)
+                    with torch.profiler.record_function("calibration"):
+                        calibration = calibrate_precision_params(precision_samples)
                     
                     # Update all previously processed files
-                    logger.info(f"Updating {len(processed_files)} NPZ files with calibrated precision...")
-                    for npz_path in tqdm(processed_files, desc="Updating NPZ files", unit="file"):
-                        update_npz_with_calibrated_precision(npz_path, calibration)
+                    with torch.profiler.record_function("calibration_global"):
+                        logger.info(f"Updating {len(processed_files)} NPZ files with calibrated precision...")
+                        for npz_path in tqdm(processed_files, desc="Updating NPZ files", unit="file"):
+                            update_npz_with_calibrated_precision(npz_path, calibration)
                     
                     # Clear samples to free memory
                     precision_samples = None
@@ -848,22 +874,24 @@ def main():
                     logger.info("Calibration complete. Continuing with remaining pairs...\n")
                 
                 # Process pair and get output paths (and updated precision samples)
-                new_outputs, precision_samples = process_batch(
-                    model=model,
-                    batch_pairs=[(pair_id, path_A, path_B)],
-                    output_dir=args.output_dir,
-                    cache=cache,
-                    num_samples=args.num_samples,
-                    stats=stats,
-                    precision_samples=precision_samples,
-                    max_calibration_samples=max_calibration_samples,
-                    calibration_sample_size=args.calibration_sample_size,
-                    calibration=calibration,
-                )
+                with torch.profiler.record_function("process_batch"):
+                    new_outputs, precision_samples = process_batch(
+                        model=model,
+                        batch_pairs=[(pair_id, path_A, path_B)],
+                        output_dir=args.output_dir,
+                        cache=cache,
+                        num_samples=args.num_samples,
+                        stats=stats,
+                        precision_samples=precision_samples,
+                        max_calibration_samples=max_calibration_samples,
+                        calibration_sample_size=args.calibration_sample_size,
+                        calibration=calibration,
+                    )
                 
                 # Track processed files for calibration update (only before calibration)
-                if not calibration_complete and precision_samples is not None:
-                    processed_files.extend(new_outputs)
+                with torch.profiler.record_function("update_output"):
+                    if not calibration_complete and precision_samples is not None:
+                        processed_files.extend(new_outputs)
                 
                 pbar.update(1)
                 
@@ -883,6 +911,7 @@ def main():
             
             idx = batch_end
     
+    prof.export_chrome_trace("trace.json")
     # Final statistics
     elapsed = time.time() - stats['start_time']
     logger.info("\n" + "="*60)
