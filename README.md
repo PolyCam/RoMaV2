@@ -108,18 +108,10 @@ Running these gave me `ScanNet-1500: [34.0, 56.5, 73.9]`, and `Mega-1500: [62.8,
 
 
 ## Fused local correlation kernel
-Include the `--extra fused-local-corr` flag as:
-```bash
-uv sync --extra fused-local-corr
-```
-or 
-```bash
-uv pip install romav2[fused-local-corr]
-```
-or
-```bash
-uv add romav2[fused-local-corr]
-```
+On Linux the `fused-local-corr` kernel is a core dependency and is installed
+automatically by the Setup/Install step above (`uv sync` / `uv pip install -e .`)
+— no extra flag is required. On non-Linux platforms it is skipped and RoMa falls
+back to the pure-PyTorch local correlation.
 
 ## Settings
 By twiddling with some different settings you may reach better results on your task of interest.
