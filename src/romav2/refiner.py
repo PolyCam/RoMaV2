@@ -169,12 +169,13 @@ class ConvRefiner(nn.Module):
         )
         # Corr in other means take a kxk grid around the predicted coordinate in other image
         f_A_bdhw = f_A.permute(0, 3, 1, 2)
+        f_B_bdhw = f_B.permute(0, 3, 1, 2)
         f_BA_bdhw = f_BA.permute(0, 3, 1, 2)
         d = torch.cat((f_A_bdhw, f_BA_bdhw, emb_in_displacement), dim=1)
         if self.cfg.local_corr_radius is not None:
             local_corr = local_correlation(
                 f_A_bdhw,
-                f_B.permute(0, 3, 1, 2),
+                f_B_bdhw,
                 local_radius=self.cfg.local_corr_radius,
                 warp=prev_warp,
                 scale_factor=scale_factor,
