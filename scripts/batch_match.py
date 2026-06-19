@@ -745,6 +745,17 @@ def main():
         help='Disable bidirectional matching (only A->B; default is bidirectional)'
     )
     parser.add_argument(
+        '--no-compile',
+        dest='compile',
+        action='store_false',
+        default=True,
+        help='Disable torch.compile. Compiling is enabled by default for '
+             'throughput (match() runs at fixed resolution, so the graph is '
+             'compiled once and reused across all pairs). Disable it when '
+             'profiling/tracing, since torch.compile graph capture hides the '
+             'torch.profiler.record_function annotations.'
+    )
+    parser.add_argument(
         '--calibration-pairs',
         type=int,
         default=15,
@@ -781,10 +792,10 @@ def main():
         pairs = optimize_pair_order(pairs)
     
     # Initialize model
-    logger.info(f"Initializing RoMaV2 with setting: {args.setting}")
-    #Use compile=False for full tracing
-    #model = RoMaV2(RoMaV2.Cfg(compile=False))
-    model = RoMaV2()
+    logger.info(f"Initializing RoMaV2 with setting: {args.setting} (compile={args.compile})")
+    # compile=True is the throughput path; pass --no-compile for full tracing
+    # (torch.compile hides the profiler record_function annotations).
+    model = RoMaV2(RoMaV2.Cfg(compile=args.compile))
     model.apply_setting(args.setting)
     model.bidirectional = args.bidirectional
     model.eval()

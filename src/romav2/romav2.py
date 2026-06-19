@@ -78,7 +78,7 @@ class RoMaV2(nn.Module):
         anchor_width: int = 512
         anchor_height: int = 512
         setting: Setting = "precise"
-        compile: bool = True
+        compile: bool = False
         name: str = "RoMa v2"
 
     # settings
@@ -97,7 +97,8 @@ class RoMaV2(nn.Module):
             cfg = RoMaV2.Cfg()
             
         weights = torch.hub.load_state_dict_from_url(
-            "https://github.com/Parskatt/RoMaV2/releases/download/weights/romav2.pt"
+            "https://github.com/Parskatt/RoMaV2/releases/download/v2.0.1/romav2.0.1.pt",
+            map_location=device
         )
         self.f = Descriptor(cfg.descriptor)
         self.matcher = Matcher(cfg.matcher)
